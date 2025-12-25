@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>生詞字謎搜尋</title>
+    <style>
+        :root {
+            --select-color: #f1c40f; /* 選取中的顏色 (黃色) */
+            --found-color: #2ecc71;  /* 找到後的顏色 (綠色) */
+            --bg-color: #2c3e50;
+        }
+
+        body {
+            font-family: "微軟正黑體", sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #f0f2f5;
+            margin: 0;
+            padding: 20px;
+            user-select: none; /* 禁止反白文字 */
+            touch-action: none; /* 防止手機滑動頁面 */
+        }
+
+        h1 { color: #333; margin-bottom: 10px; }
+
+        /* 遊戲主容器：左右排列 */
+        .game-container {
+            display: flex;
+            gap: 30px;
+            align-items: flex-start;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        /* 字謎網格區 */
+        #grid-area {
+            background: white;
+            padding: 10px;
+            border-radius: 10px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+            position: relative;
+            cursor: crosshair;
+        }
+
+        .row {
+            display: flex;
+        }
+
+        .cell {
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #555;
+            border: 1px solid #eee;
+            box-sizing: border-box;
+            transition: background 0.1s;
+        }
+
+        /* 選取狀態 */
+        .cell.selected {
+            background-color: var(--select-color);
+            color: white;
+            border-radius: 50%;
+        }
+
+        /* 找到狀態 */
+        .cell.found {
+            background-color: var(--found-color);
+            color: white;
+            animation: pop 0.3s;
+        }
+
+        /* 右側單字清單 */
+        .word-list {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            min-width: 200px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+        }
+
+        .word-list h3 { margin-top: 0; border-bottom: 2px solid #eee; padding-bottom: 10px;}
+
+        .word-item {
+            font-size: 1.2em;
+            margin-bottom: 8px;
+            color: #666;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .word-item.done {
+            text-decoration: line-through;
+            color: #bbb;
+        }
+        
+        .word-item.done::after {
+            content: "✔";
+            color: var(--found-color);
+        }
+
+        /* 控制按鈕 */
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 15px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 1em;
+            cursor: pointer;
+            background-color: var(--bg-color);
+            color: white;
+            border: none;
+            border-radius: 5px;
+        }
+        button:hover { opacity: 0.9; }
+
+        /* 畫線 Canvas (浮在網格上) */
+        #canvas-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none; /* 讓點擊穿透到下方的 div */
+        }
+
+        @keyframes pop {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.2); }
+            100% { transform: scale(1); }
+        }
+
+        /* 手機版調整 */
+        @media (max-width: 700px) {
+            .cell { width: 32px; height: 32px; font-size: 1em; }
+            .game-container { flex-direction: column-reverse; align-items: center; }
+            .word-list { width: 90%; }
+        }
+    </style>
+</head>
+<body>
+
+    <h1>生詞字謎搜尋</h1>
+    <p style="color:#666; margin-top:0;">(請在網格中滑動找出右側的單字)</p>
+
+    <div class="game-container">
+        <div class="word-list">
+            <h3>尋找清單:</h3>
+            <div id="words-to-find"></div>
+        </div>
+
+        <div id="grid-area">
+            </div>
+    </div>
+
+    <div class="controls">
+        <button onclick="initGame()">重新生成 (刷新)</button>
+    </div>
+
+    <script src="words.js"></script>
+
+    <script>
+        // --- 設定 ---
+        const GRID_SIZE = 10; // 網格大小 10x10
+        const DIRECTIONS = [
+            [0, 1],  // 橫向 (向右)
+            [1, 0],  // 直向 (向下)
+            [1, 1],  // 斜向 (右下)
+            [-1, 1]  // 斜向 (右上) - 增加難度可開啟
+        ];
+        
+        // 用來填補空白的隨機中文字 (常用字庫)
+        const FILLER_CHARS = "的一是在不了有和人這中大為上個國我以要他時來用們生到作地於出就分對成會可主發年動同工也能下過子說產種面而方後多定行學法所民得經十三之進著等部度家更完天";
+
+        // --- 變數 ---
+        let gridData = [];
+        let placedWords = []; // 實際成功放入的單字
+        let isSelecting = false;
+        let startCell = null;
+        let endCell = null;
+        let selectionPath = []; // 記錄選取路徑上的格子
+
+        // DOM
+        const gridArea = document.getElementById('grid-area');
+        const wordListEl = document.getElementById('words-to-find');
+
+        if (typeof wordData === 'undefined') {
+            alert("找不到 words.js");
+        }
+
+        // --- 核心邏輯: 遊戲初始化 ---
+        function initGame() {
+            // 1. 清空狀態
+            gridData = Array(GRID_SIZE).fill(null).map(() => Array(GRID_SIZE).fill(''));
+            placedWords = [];
+            gridArea.innerHTML = '';
+            wordListEl.innerHTML = '';
+
+            // 2. 選取單字 (取前10個，或全部)
+            // 先洗牌，增加隨機性
+            let shuffled = [...wordData].sort(() => 0.5 - Math.random());
+            let targetWords = shuffled.slice(0, 12); // 最多放12個，以免塞不下
+
+            // 3. 嘗試放入單字
+            targetWords.forEach(item => {
+                placeWord(item.word);
+            });
+
+            // 4. 填補空白並繪製網格
+            fillBlanksAndRender();
+
+            // 5. 顯示右側清單 (顯示 中文生詞)
+            // 如果您希望顯示英文讓學生找中文，把 `w.word` 改成 `w.meaning` 即可
+            placedWords.forEach(w => {
+                let div = document.createElement('div');
+                div.className = 'word-item';
+                div.id = `list-${w}`;
+                div.innerText = w; 
+                div.dataset.word = w;
+                wordListEl.appendChild(div);
+            });
+        }
+
+        // --- 邏輯: 放置單字 (Backtracking 概念) ---
+        function placeWord(word) {
+            // 嘗試 50 次隨機放置，如果都失敗就放棄這個字
+            let attempts = 0;
+            while (attempts < 50) {
+                const direction = DIRECTIONS[Math.floor(Math.random() * DIRECTIONS.length)];
+                const startRow = Math.floor(Math.random() * GRID_SIZE);
+                const startCol = Math.floor(Math.random() * GRID_SIZE);
+
+                if (canPlace(word, startRow, startCol, direction)) {
+                    // 真的放進去
+                    for (let i = 0; i < word.length; i++) {
+                        gridData[startRow + i * direction[0]][startCol + i * direction[1]] = word[i];
+                    }
+                    placedWords.push(word);
+                    return true;
+                }
+                attempts++;
+            }
+            return false;
+        }
+
+        // 檢查是否能放
+        function canPlace(word, r, c, dir) {
+            for (let i = 0; i < word.length; i++) {
+                const nr = r + i * dir[0];
+                const nc = c + i * dir[1];
+
+                // 檢查邊界
+                if (nr < 0 || nr >= GRID_SIZE || nc < 0 || nc >= GRID_SIZE) return false;
+
+                // 檢查重疊 (如果該格是空的，或是跟目前字母一樣，就可以)
+                const cellChar = gridData[nr][nc];
+                if (cellChar !== '' && cellChar !== word[i]) return false;
+            }
+            return true;
+        }
+
+        // --- 邏輯: 渲染畫面 ---
+        function fillBlanksAndRender() {
+            for (let r = 0; r < GRID_SIZE; r++) {
+                let rowDiv = document.createElement('div');
+                rowDiv.className = 'row';
+                for (let c = 0; c < GRID_SIZE; c++) {
+                    // 填補空白
+                    if (gridData[r][c] === '') {
+                        gridData[r][c] = FILLER_CHARS[Math.floor(Math.random() * FILLER_CHARS.length)];
+                    }
+
+                    // 建立 DOM
+                    let cell = document.createElement('div');
+                    cell.className = 'cell';
+                    cell.textContent = gridData[r][c];
+                    cell.dataset.r = r;
+                    cell.dataset.c = c;
+                    
+                    // 滑鼠/觸控事件
+                    cell.addEventListener('mousedown', handleStart);
+                    cell.addEventListener('mouseenter', handleMove);
+                    cell.addEventListener('touchstart', handleTouchStart, {passive: false});
+                    
+                    rowDiv.appendChild(cell);
+                }
+                gridArea.appendChild(rowDiv);
+            }
+            
+            // 全局結束事件
+            document.addEventListener('mouseup', handleEnd);
+            document.addEventListener('touchend', handleEnd);
+        }
+
+        // --- 互動事件處理 ---
+        
+        function handleStart(e) {
+            isSelecting = true;
+            startCell = e.target;
+            highlightCells(startCell, startCell);
+        }
+
+        function handleMove(e) {
+            if (!isSelecting) return;
+            endCell = e.target;
+            highlightCells(startCell, endCell);
+        }
+
+        // 手機觸控模擬
+        function handleTouchStart(e) {
+            e.preventDefault(); // 防止捲動
+            let touch = e.touches[0];
+            let target = document.elementFromPoint(touch.clientX, touch.clientY);
+            if(target && target.classList.contains('cell')) {
+                handleStart({target: target});
+            }
+        }
+        
+        // 手機觸控移動 (需要綁在 gridArea 上)
+        gridArea.addEventListener('touchmove', function(e) {
+            if (!isSelecting) return;
+            e.preventDefault();
+            let touch = e.touches[0];
+            let target = document.elementFromPoint(touch.clientX, touch.clientY);
+            if (target && target.classList.contains('cell')) {
+                handleMove({target: target});
+            }
+        }, {passive: false});
+
+
+        function handleEnd() {
+            if (!isSelecting) return;
+            isSelecting = false;
+
+            // 檢查是否選中正確單字
+            const selectedWord = selectionPath.map(cell => cell.textContent).join('');
+            
+            // 支援反向選取 (例如從下往上拉)
+            const reversedWord = selectedWord.split('').reverse().join('');
+
+            if (checkWord(selectedWord) || checkWord(reversedWord)) {
+                // 答對了：標記為永久綠色
+                selectionPath.forEach(cell => cell.classList.add('found'));
+                
+                // 播放音效 (選用)
+                // speak(checkWord(selectedWord) ? selectedWord : reversedWord);
+            }
+
+            // 清除黃色選取狀態
+            document.querySelectorAll('.cell.selected').forEach(el => el.classList.remove('selected'));
+            selectionPath = [];
+            startCell = null;
+            endCell = null;
+        }
+
+        function highlightCells(start, end) {
+            // 清除舊的選取
+            document.querySelectorAll('.cell.selected').forEach(el => el.classList.remove('selected'));
+            selectionPath = [];
+
+            const r1 = parseInt(start.dataset.r);
+            const c1 = parseInt(start.dataset.c);
+            const r2 = parseInt(end.dataset.r);
+            const c2 = parseInt(end.dataset.c);
+
+            // 計算方向向量
+            let dr = r2 - r1;
+            let dc = c2 - c1;
+
+            // 判斷是否為直線 (橫、直、斜)
+            if (dr === 0 && dc === 0) {
+                // 同一格
+                start.classList.add('selected');
+                selectionPath.push(start);
+                return;
+            }
+
+            // 簡單正規化向量 (例如 (0, 5) 變成 (0, 1))
+            const steps = Math.max(Math.abs(dr), Math.abs(dc));
+            
+            // 檢查是否為合法的 8 方向 (dx, dy 必須相等或者是 0)
+            if (Math.abs(dr) !== 0 && Math.abs(dc) !== 0 && Math.abs(dr) !== Math.abs(dc)) {
+                return; // 不是直線，不畫
+            }
+
+            const stepR = dr / steps;
+            const stepC = dc / steps;
+
+            for (let i = 0; i <= steps; i++) {
+                let nr = r1 + Math.round(i * stepR);
+                let nc = c1 + Math.round(i * stepC);
+                
+                // 找到對應的 DOM
+                let cell = document.querySelector(`.cell[data-r='${nr}'][data-c='${nc}']`);
+                if (cell) {
+                    cell.classList.add('selected');
+                    selectionPath.push(cell);
+                }
+            }
+        }
+
+        function checkWord(word) {
+            // 檢查是否在我們的列表中
+            if (placedWords.includes(word)) {
+                const listEl = document.getElementById(`list-${word}`);
+                if (listEl && !listEl.classList.contains('done')) {
+                    listEl.classList.add('done'); // 劃掉清單
+                    
+                    // 檢查是否全部完成
+                    if (document.querySelectorAll('.word-item.done').length === placedWords.length) {
+                        setTimeout(() => alert("恭喜！所有單字都找到了！"), 300);
+                    }
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // 語音功能 (選用)
+        function speak(text) {
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel(); 
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.lang = 'zh-TW';
+                window.speechSynthesis.speak(utterance);
+            }
+        }
+
+        // 啟動
+        initGame();
+
+    </script>
+</body>
+</html>
